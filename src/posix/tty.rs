@@ -934,6 +934,14 @@ impl SerialPort for TTYPort {
             baud_rate: self.baud_rate,
         }))
     }
+
+    fn set_break(&self) -> Result<()> {
+        ioctl::tiocsbrk(self.fd)
+    }
+
+    fn clear_break(&self) -> Result<()>{
+        ioctl::tioccbrk(self.fd)
+    }
 }
 
 /// Retrieves the udev property value named by `key`. If the value exists, then it will be

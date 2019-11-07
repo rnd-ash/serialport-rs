@@ -8,6 +8,7 @@ and this project adheres to http://semver.org/[Semantic Versioning].
 === [UNRELEASED]
 ==== Added
 * Added `send_break()` to `TTYPort`
+* Added `set_break()` and `clear_break()` to `SerialPort`
 * Enable `available_ports()` for Linux musl targets and those without the `libudev`
   feature enabled by scanning `/sys/` for ports.
 

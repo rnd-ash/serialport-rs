@@ -459,6 +459,12 @@ pub trait SerialPort: Send + io::Read + io::Write {
     ///
     /// This function returns an error if the serial port couldn't be cloned.
     fn try_clone(&self) -> Result<Box<dyn SerialPort>>;
+
+    /// Start transmitting a break
+    fn set_break(&self) -> Result<()>;
+
+    /// End transmitting a break
+    fn clear_break(&self) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
