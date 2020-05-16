@@ -73,6 +73,24 @@ environment:
       target: i686-pc-windows-gnu
       BITS: 32
 
+### UWP Toolchains ###
+
+    - channel: stable
+      target: aarch64-uwp-windows-msvc
+      BITS: 64
+    - channel: stable
+      target: i686-uwp-windows-gnu
+      BITS: 32
+    - channel: stable
+      target: i686-uwp-windows-msvc
+      BITS: 32
+    - channel: stable
+      target: x86_64-uwp-windows-gnu
+      BITS: 64
+    - channel: stable
+      target: x86_64-uwp-windows-msvc
+      BITS: 64
+
 ## Install Script ##
 
 # This is the most important part of the Appveyor configuration. This installs the version of Rust
