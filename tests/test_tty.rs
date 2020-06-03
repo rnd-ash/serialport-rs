@@ -4,21 +4,23 @@
 extern crate serialport;
 
 use std::io::{Read, Write};
+use std::mem::MaybeUninit;
 use std::os::unix::prelude::*;
 use std::str;
-use std::time::Duration;
 
-use serialport::{SerialPort, TTYPort};
+use nix::unistd::close;
+
+use serialport::{ReadMode, SerialPort, TTYPort};
 
 #[test]
 fn test_ttyport_pair() {
     // FIXME: Create a mutex across all tests for using `TTYPort::pair()` as it's not threadsafe
     let (mut master, mut slave) = TTYPort::pair().expect("Unable to create ptty pair");
     master
-        .set_timeout(Duration::from_millis(10))
+        .set_read_mode(ReadMode::TimeoutAfterMs(10))
         .expect("Unable to set timeout on the master");
     slave
-        .set_timeout(Duration::from_millis(10))
+        .set_read_mode(ReadMode::TimeoutAfterMs(10))
         .expect("Unable to set timeout on the slave");
 
     // Test file descriptors.
@@ -72,7 +74,7 @@ fn test_ttyport_timeout() {
     std::thread::spawn(move || {
         // FIXME: Create a mutex across all tests for using `TTYPort::pair()` as it's not threadsafe
         let (mut master, _slave) = TTYPort::pair().expect("Unable to create ptty pair");
-        master.set_timeout(Duration::new(1, 0)).unwrap();
+        master.set_read_mode(ReadMode::TimeoutAfterMs(1)).unwrap();
 
         let mut buffer = [0u8];
         let read_res = master.read(&mut buffer);
@@ -131,4 +133,33 @@ fn test_ttyport_set_nonstandard_baud() {
     assert_eq!(slave.baud_rate().unwrap(), 60000);
     slave.set_baud_rate(1_200_000).unwrap();
     assert_eq!(slave.baud_rate().unwrap(), 1_200_000);
+}
+
+#[test]
+fn test_ttyport_into_raw_fd() {
+    // `master` must be used here as Dropping it causes slave to be deleted by the OS.
+    // TODO: Convert this to a statement-level attribute once
+    //       https://github.com/rust-lang/rust/issues/15701 is on stable.
+    // FIXME: Create a mutex across all tests for using `TTYPort::pair()` as it's not threadsafe
+    #![allow(unused_variables)]
+    let (master, slave) = TTYPort::pair().expect("Unable to create ptty pair");
+
+    // First test with the master
+    let master_fd = master.into_raw_fd();
+    let mut termios = MaybeUninit::uninit();
+    let res = unsafe { nix::libc::tcgetattr(master_fd, termios.as_mut_ptr()) };
+    if res != 0 {
+        close(master_fd).unwrap();
+        panic!("tcgetattr on the master port failed");
+    }
+
+    // And then the slave
+    let slave_fd = slave.into_raw_fd();
+    let res = unsafe { nix::libc::tcgetattr(slave_fd, termios.as_mut_ptr()) };
+    if res != 0 {
+        close(slave_fd).unwrap();
+        panic!("tcgetattr on the master port failed");
+    }
+    close(master_fd).unwrap();
+    close(slave_fd).unwrap();
 }

@@ -334,6 +334,8 @@ cfg_if! {
         /// The `SerialPortInfo` struct contains the name of the port
         /// which can be used for opening it.
         pub fn available_ports() -> Result<Vec<SerialPortInfo>> {
+            use crate::ReadMode;
+
             let mut vec = Vec::new();
             if let Ok(context) = libudev::Context::new() {
                 let mut enumerator = libudev::Enumerator::new(&context)?;
@@ -344,7 +346,7 @@ cfg_if! {
                         if let Some(devnode) = d.devnode() {
                             if let Some(path) = devnode.to_str() {
                                 if let Some(driver) = p.driver() {
-                                    if driver == "serial8250" && crate::new(path, 9600).open().is_err() {
+                                    if driver == "serial8250" && crate::new(path, 9600, ReadMode::Polling).open().is_err() {
                                         continue;
                                     }
                                 }

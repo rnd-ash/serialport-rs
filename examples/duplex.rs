@@ -15,10 +15,12 @@ use std::io::Write;
 use std::time::Duration;
 use std::{io, thread};
 
+use serialport::ReadMode;
+
 fn main() {
     // Open the first serialport available.
     let port_name = &serialport::available_ports().expect("No serial port")[0].port_name;
-    let mut port = serialport::new(port_name, 9600)
+    let mut port = serialport::new(port_name, 9600, ReadMode::Polling)
         .open()
         .expect("Failed to open serial port");
 

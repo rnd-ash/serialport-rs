@@ -1,6 +1,5 @@
 use std::mem::MaybeUninit;
 use std::os::windows::prelude::*;
-use std::time::Duration;
 use std::{io, ptr};
 
 use winapi::shared::minwindef::*;
@@ -10,11 +9,11 @@ use winapi::um::handleapi::*;
 use winapi::um::processthreadsapi::GetCurrentProcess;
 use winapi::um::winbase::*;
 use winapi::um::winnt::{
-    DUPLICATE_SAME_ACCESS, FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    DUPLICATE_SAME_ACCESS, FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXDWORD,
 };
 
 use crate::{
-    ClearBuffer, DataBits, Error, ErrorKind, FlowControl, Parity, Result, SerialPort,
+    ClearBuffer, DataBits, Error, ErrorKind, FlowControl, Parity, ReadMode, Result, SerialPort,
     SerialPortBuilder, StopBits,
 };
 
@@ -27,7 +26,7 @@ use crate::{
 #[derive(Debug)]
 pub struct COMPort {
     handle: HANDLE,
-    timeout: Duration,
+    read_mode: ReadMode,
     port_name: Option<String>,
 }
 
@@ -107,7 +106,7 @@ impl COMPort {
                 Ok(COMPort {
                     handle: cloned_handle,
                     port_name: self.port_name.clone(),
-                    timeout: self.timeout,
+                    read_mode: self.read_mode,
                 })
             } else {
                 Err(super::error::last_os_error())
@@ -136,7 +135,7 @@ impl COMPort {
         // We'll punt and set it `None` here.
         COMPort {
             handle: handle as HANDLE,
-            timeout: Duration::from_millis(100),
+            read_mode: get_com_read_mode(handle),
             port_name: None,
         }
     }
@@ -240,26 +239,32 @@ impl SerialPort for COMPort {
         self.port_name.clone()
     }
 
-    fn timeout(&self) -> Duration {
-        self.timeout
+    fn read_mode(&self) -> ReadMode {
+        self.read_mode
     }
 
-    fn set_timeout(&mut self, timeout: Duration) -> Result<()> {
-        let milliseconds = timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000;
-
-        let mut timeouts = COMMTIMEOUTS {
-            ReadIntervalTimeout: 0,
-            ReadTotalTimeoutMultiplier: 0,
-            ReadTotalTimeoutConstant: milliseconds as DWORD,
-            WriteTotalTimeoutMultiplier: 0,
-            WriteTotalTimeoutConstant: 0,
+    fn set_read_mode(&mut self, read_mode: ReadMode) -> Result<()> {
+        let mut timeouts = match read_mode {
+            ReadMode::Polling => COMMTIMEOUTS {
+                ReadIntervalTimeout: MAXDWORD,
+                ReadTotalTimeoutMultiplier: 0,
+                ReadTotalTimeoutConstant: 0,
+                WriteTotalTimeoutMultiplier: 0,
+                WriteTotalTimeoutConstant: 0,
+            },
+            ReadMode::TimeoutAfterMs(t) => COMMTIMEOUTS {
+                ReadIntervalTimeout: 0,
+                ReadTotalTimeoutMultiplier: 0,
+                ReadTotalTimeoutConstant: t as DWORD,
+                WriteTotalTimeoutMultiplier: 0,
+                WriteTotalTimeoutConstant: 0,
+            },
         };
-
         if unsafe { SetCommTimeouts(self.handle, &mut timeouts) } == 0 {
             return Err(super::error::last_os_error());
         }
 
-        self.timeout = timeout;
+        self.read_mode = read_mode;
         Ok(())
     }
 
@@ -457,5 +462,26 @@ impl SerialPort for COMPort {
             Ok(p) => Ok(Box::new(p)),
             Err(e) => Err(e),
         }
+    }
+}
+
+fn get_com_read_mode(handle: RawHandle) -> ReadMode {
+    let mut timeouts = MaybeUninit::uninit();
+    if unsafe { GetCommTimeouts(handle as *mut winapi::ctypes::c_void, timeouts.as_mut_ptr()) } == 0
+    {
+        panic!("GetCommTimouts failed on handle {:#?}", handle);
+    }
+    let timeouts = unsafe { timeouts.assume_init() };
+
+    if timeouts.ReadIntervalTimeout == MAXDWORD && timeouts.ReadTotalTimeoutMultiplier == MAXDWORD {
+        ReadMode::TimeoutAfterMs(timeouts.ReadTotalTimeoutConstant as u16)
+    } else if timeouts.ReadIntervalTimeout == MAXDWORD
+        && timeouts.ReadTotalTimeoutMultiplier == 0
+        && timeouts.ReadTotalTimeoutConstant == 0
+    {
+        ReadMode::Polling
+    } else {
+        panic!("Unknown read mode found: {{ ReadIntervalTimeout = {}, ReadTotalTimeoutMultiplier = {}, ReadTotalTimeoutConstant = {} ",
+            timeouts.ReadIntervalTimeout, timeouts.ReadTotalTimeoutMultiplier, timeouts.ReadTotalTimeoutConstant)
     }
 }

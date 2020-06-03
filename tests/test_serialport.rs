@@ -2,7 +2,6 @@
 #![cfg(unix)]
 
 use serialport::*;
-use std::time::Duration;
 
 #[test]
 fn test_listing_ports() {
@@ -16,39 +15,37 @@ fn test_listing_ports() {
 fn test_opening_found_ports() {
     let ports = serialport::available_ports().unwrap();
     for p in ports {
-        let _port = serialport::new(p.port_name, 9600).open();
+        let _port = serialport::new(p.port_name, 9600, ReadMode::Polling).open();
     }
 }
 
 #[test]
 fn test_opening_port() {
-    let _port = serialport::new("/dev/ttyUSB0", 9600).open();
+    let _port = serialport::new("/dev/ttyUSB0", 9600, ReadMode::Polling).open();
 }
 
 #[test]
 fn test_opening_native_port() {
-    let _port = serialport::new("/dev/ttyUSB0", 9600).open_native();
+    let _port = serialport::new("/dev/ttyUSB0", 9600, ReadMode::Polling).open_native();
 }
 
 #[test]
 fn test_configuring_ports() {
-    let _port = serialport::new("/dev/ttyUSB0", 9600)
+    let _port = serialport::new("/dev/ttyUSB0", 9600, ReadMode::TimeoutAfterMs(1))
         .data_bits(DataBits::Five)
         .flow_control(FlowControl::None)
         .parity(Parity::None)
         .stop_bits(StopBits::One)
-        .timeout(Duration::from_millis(1))
         .open();
 }
 
 #[test]
 fn test_duplicating_port_config() {
-    let port1_config = serialport::new("/dev/ttyUSB0", 9600)
+    let port1_config = serialport::new("/dev/ttyUSB0", 9600, ReadMode::TimeoutAfterMs(1))
         .data_bits(DataBits::Five)
         .flow_control(FlowControl::None)
         .parity(Parity::None)
-        .stop_bits(StopBits::One)
-        .timeout(Duration::from_millis(1));
+        .stop_bits(StopBits::One);
 
     let port2_config = port1_config.clone().path("/dev/ttyUSB1").baud_rate(115_200);
 

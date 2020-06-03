@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use clap::{App, AppSettings, Arg};
 
-use serialport::ClearBuffer;
+use serialport::{ClearBuffer, ReadMode};
 
 fn main() {
     let matches = App::new("Serialport Example - Clear Input Buffer")
@@ -76,8 +76,7 @@ fn run(port_name: &str, baud_rate: &str) -> Result<(), Box<dyn Error>> {
         .parse::<u32>()
         .map_err(|_| format!("Invalid baud rate '{}' specified", baud_rate))?;
 
-    let port = serialport::new(port_name, rate)
-        .timeout(Duration::from_millis(10))
+    let port = serialport::new(port_name, rate, ReadMode::TimeoutAfterMs(10))
         .open()
         .map_err(|ref e| format!("Port '{}' not available: {}", &port_name, e))?;
 

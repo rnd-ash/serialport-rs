@@ -28,9 +28,7 @@
 
 use std::convert::From;
 use std::error::Error as StdError;
-use std::fmt;
-use std::io;
-use std::time::Duration;
+use std::{fmt, io};
 
 #[cfg(unix)]
 mod posix;
@@ -194,6 +192,15 @@ pub enum ClearBuffer {
     All,
 }
 
+/// Specifies the reading mode
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ReadMode {
+    /// Returns immediately with any available data
+    Polling,
+    /// Returns when any data is available or the specified timeout is reached
+    TimeoutAfterMs(u16),
+}
+
 /// A struct containing all serial port settings
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialPortBuilder {
@@ -209,8 +216,8 @@ pub struct SerialPortBuilder {
     parity: Parity,
     /// Number of bits to use to signal the end of a character
     stop_bits: StopBits,
-    /// Amount of time to wait to receive data before timing out
-    timeout: Duration,
+    /// Mode for reading from the port
+    read_mode: ReadMode,
 }
 
 impl SerialPortBuilder {
@@ -250,9 +257,9 @@ impl SerialPortBuilder {
         self
     }
 
-    /// Set the amount of time to wait to receive data before timing out
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+    /// Set the reading mode for the port
+    pub fn read_mode(mut self, read_mode: ReadMode) -> Self {
+        self.read_mode = read_mode;
         self
     }
 
@@ -335,8 +342,8 @@ pub trait SerialPort: Send + io::Read + io::Write {
     /// stop bits to a supported value.
     fn stop_bits(&self) -> Result<StopBits>;
 
-    /// Returns the current timeout.
-    fn timeout(&self) -> Duration;
+    /// Returns the current read mode.
+    fn read_mode(&self) -> ReadMode;
 
     // Port settings setters
 
@@ -361,8 +368,8 @@ pub trait SerialPort: Send + io::Read + io::Write {
     /// Sets the number of stop bits.
     fn set_stop_bits(&mut self, stop_bits: StopBits) -> Result<()>;
 
-    /// Sets the timeout for future I/O operations.
-    fn set_timeout(&mut self, timeout: Duration) -> Result<()>;
+    /// Sets the reading mode.
+    fn set_read_mode(&mut self, read_mode: ReadMode) -> Result<()>;
 
     // Functions for setting non-data control signal pins
 
@@ -540,7 +547,11 @@ pub struct SerialPortInfo {
 /// ```fail
 /// serialport::new("/dev/ttyUSB0", 9600).open().expect("Failed to open port");
 /// ```
-pub fn new<'a>(path: impl Into<std::borrow::Cow<'a, str>>, baud_rate: u32) -> SerialPortBuilder {
+pub fn new<'a>(
+    path: impl Into<std::borrow::Cow<'a, str>>,
+    baud_rate: u32,
+    read_mode: ReadMode,
+) -> SerialPortBuilder {
     SerialPortBuilder {
         path: path.into().into_owned(),
         baud_rate,
@@ -548,7 +559,7 @@ pub fn new<'a>(path: impl Into<std::borrow::Cow<'a, str>>, baud_rate: u32) -> Se
         flow_control: FlowControl::None,
         parity: Parity::None,
         stop_bits: StopBits::One,
-        timeout: Duration::from_millis(0),
+        read_mode,
     }
 }
 

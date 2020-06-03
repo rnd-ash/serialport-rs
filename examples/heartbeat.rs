@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use clap::{App, AppSettings, Arg};
 
+use serialport::ReadMode;
+
 fn main() {
     let matches = App::new("Serialport Example - Heartbeat")
         .about("Write bytes to a serial port at 1Hz")
@@ -24,7 +26,7 @@ fn main() {
     let port_name = matches.value_of("port").unwrap();
     let baud_rate = matches.value_of("baud").unwrap().parse::<u32>().unwrap();
 
-    let port = serialport::new(port_name, baud_rate).open();
+    let port = serialport::new(port_name, baud_rate, ReadMode::Polling).open();
 
     match port {
         Ok(mut port) => {

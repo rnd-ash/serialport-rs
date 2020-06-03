@@ -5,11 +5,12 @@ use std::time::Duration;
 use std::{io, mem};
 
 use nix::fcntl::fcntl;
+use nix::libc::{VMIN, VTIME};
 use nix::{self, libc, unistd};
 
 use crate::posix::ioctl::{self, SerialLines};
 use crate::{
-    ClearBuffer, DataBits, Error, ErrorKind, FlowControl, Parity, Result, SerialPort,
+    ClearBuffer, DataBits, Error, ErrorKind, FlowControl, Parity, ReadMode, Result, SerialPort,
     SerialPortBuilder, StopBits,
 };
 
@@ -48,7 +49,7 @@ fn is_nonstandard_baud(baud: u32) -> bool {
 #[derive(Debug)]
 pub struct TTYPort {
     fd: RawFd,
-    timeout: Duration,
+    read_mode: ReadMode,
     exclusive: bool,
     port_name: Option<String>,
     #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -144,14 +145,39 @@ impl TTYPort {
             e
         })?;
 
-        let port = TTYPort {
+        let mut port = TTYPort {
             fd,
-            timeout: builder.timeout, // This is overwritten by the subsequent call to `set_all()`
-            exclusive: true,          // This is guaranteed by the above `ioctl::tiocexcl()` call
+            read_mode: builder.read_mode,
+            exclusive: true, // This is guaranteed by the above `ioctl::tiocexcl()` call
             port_name: Some(builder.path.clone()),
             #[cfg(any(target_os = "ios", target_os = "macos"))]
             baud_rate: builder.baud_rate,
         };
+
+        if let Err(e) = port.set_baud_rate(builder.baud_rate) {
+            close(fd);
+            return Err(e);
+        }
+        if let Err(e) = port.set_data_bits(builder.data_bits) {
+            close(fd);
+            return Err(e);
+        }
+        if let Err(e) = port.set_flow_control(builder.flow_control) {
+            close(fd);
+            return Err(e);
+        }
+        if let Err(e) = port.set_parity(builder.parity) {
+            close(fd);
+            return Err(e);
+        }
+        if let Err(e) = port.set_stop_bits(builder.stop_bits) {
+            close(fd);
+            return Err(e);
+        }
+        if let Err(e) = port.set_read_mode(builder.read_mode) {
+            close(fd);
+            return Err(e);
+        }
 
         Ok(port)
     }
@@ -257,7 +283,8 @@ impl TTYPort {
 
         // Open the slave port
         let baud_rate = 9600;
-        let builder = crate::new(ptty_name, baud_rate).timeout(Duration::from_millis(1));
+        let read_mode = ReadMode::Polling;
+        let builder = crate::new(ptty_name, baud_rate, read_mode);
         let slave_tty = TTYPort::open(&builder)?;
 
         // Manually construct the master port here because the
@@ -265,7 +292,7 @@ impl TTYPort {
         // BSDs when used on the master port.
         let master_tty = TTYPort {
             fd: next_pty_fd.into_raw_fd(),
-            timeout: Duration::from_millis(100),
+            read_mode: read_mode,
             exclusive: true,
             port_name: None,
             #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -304,7 +331,7 @@ impl TTYPort {
             fd: fd_cloned,
             exclusive: self.exclusive,
             port_name: self.port_name.clone(),
-            timeout: self.timeout,
+            read_mode: self.read_mode,
             #[cfg(any(target_os = "ios", target_os = "macos"))]
             baud_rate: self.baud_rate,
         })
@@ -445,11 +472,29 @@ fn get_termios_speed(fd: RawFd) -> u32 {
     termios.c_ospeed as u32
 }
 
+fn get_termios_read_mode(fd: RawFd) -> ReadMode {
+    let mut termios = MaybeUninit::uninit();
+    let res = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
+    nix::errno::Errno::result(res).expect("Failed to get termios data");
+    let termios = unsafe { termios.assume_init() };
+
+    if termios.c_cc[VMIN] == 0 && termios.c_cc[VTIME] == 0 {
+        ReadMode::Polling
+    } else if termios.c_cc[VMIN] == 0 && termios.c_cc[VTIME] > 0 {
+        ReadMode::TimeoutAfterMs(termios.c_cc[VTIME] as u16 * 10)
+    } else {
+        panic!(
+            "Unknown read mode found: {{ VMIN = {}, VTIME = {}",
+            termios.c_cc[VMIN], termios.c_cc[VTIME]
+        )
+    }
+}
+
 impl FromRawFd for TTYPort {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         TTYPort {
             fd,
-            timeout: Duration::from_millis(100),
+            read_mode: get_termios_read_mode(fd),
             exclusive: ioctl::tiocexcl(fd).is_ok(),
             // It is not trivial to get the file path corresponding to a file descriptor.
             // We'll punt on it and set it to `None` here.
@@ -465,7 +510,7 @@ impl FromRawFd for TTYPort {
 
 impl io::Read for TTYPort {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Err(e) = super::poll::wait_read_fd(self.fd, self.timeout) {
+        if let Err(e) = super::poll::wait_read_fd(self.fd, Duration::new(0, 0)) {
             return Err(io::Error::from(Error::from(e)));
         }
 
@@ -478,7 +523,7 @@ impl io::Read for TTYPort {
 
 impl io::Write for TTYPort {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Err(e) = super::poll::wait_write_fd(self.fd, self.timeout) {
+        if let Err(e) = super::poll::wait_write_fd(self.fd, Duration::new(0, 0)) {
             return Err(io::Error::from(Error::from(e)));
         }
 
@@ -664,8 +709,8 @@ impl SerialPort for TTYPort {
         }
     }
 
-    fn timeout(&self) -> Duration {
-        self.timeout
+    fn read_mode(&self) -> ReadMode {
+        self.read_mode
     }
 
     #[cfg(any(
@@ -834,9 +879,21 @@ impl SerialPort for TTYPort {
         self.set_termios(&termios)
     }
 
-    fn set_timeout(&mut self, timeout: Duration) -> Result<()> {
-        self.timeout = timeout;
-        Ok(())
+    fn set_read_mode(&mut self, read_mode: ReadMode) -> Result<()> {
+        self.read_mode = read_mode;
+        let mut termios = self.get_termios()?;
+        match read_mode {
+            ReadMode::Polling => {
+                termios.c_cc[VMIN] = 0;
+                termios.c_cc[VTIME] = 0;
+            }
+            ReadMode::TimeoutAfterMs(t) => {
+                assert_ne!(t, 0, "Timeout must be greater than zero");
+                termios.c_cc[VMIN] = 0;
+                termios.c_cc[VTIME] = (t / 10) as u8;
+            }
+        }
+        self.set_termios(&termios)
     }
 
     fn write_request_to_send(&mut self, level: bool) -> Result<()> {
@@ -891,33 +948,4 @@ impl SerialPort for TTYPort {
             Err(e) => Err(e),
         }
     }
-}
-
-#[test]
-fn test_ttyport_into_raw_fd() {
-    // `master` must be used here as Dropping it causes slave to be deleted by the OS.
-    // TODO: Convert this to a statement-level attribute once
-    //       https://github.com/rust-lang/rust/issues/15701 is on stable.
-    // FIXME: Create a mutex across all tests for using `TTYPort::pair()` as it's not threadsafe
-    #![allow(unused_variables)]
-    let (master, slave) = TTYPort::pair().expect("Unable to create ptty pair");
-
-    // First test with the master
-    let master_fd = master.into_raw_fd();
-    let mut termios = MaybeUninit::uninit();
-    let res = unsafe { nix::libc::tcgetattr(master_fd, termios.as_mut_ptr()) };
-    if res != 0 {
-        close(master_fd);
-        panic!("tcgetattr on the master port failed");
-    }
-
-    // And then the slave
-    let slave_fd = slave.into_raw_fd();
-    let res = unsafe { nix::libc::tcgetattr(slave_fd, termios.as_mut_ptr()) };
-    if res != 0 {
-        close(slave_fd);
-        panic!("tcgetattr on the master port failed");
-    }
-    close(master_fd);
-    close(slave_fd);
 }

@@ -17,11 +17,10 @@
 
 use std::io::Write;
 use std::str;
-use std::time::Duration;
 
 use clap::{App, AppSettings, Arg};
 
-use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
+use serialport::{ClearBuffer, DataBits, FlowControl, Parity, ReadMode, SerialPort, StopBits};
 
 fn main() {
     let matches = App::new("Serialport Example - Hardware Check")
@@ -53,7 +52,7 @@ fn main() {
     }
 
     // Run single-port tests on port1
-    let mut port1 = match serialport::new(port1_name, 9600).open() {
+    let mut port1 = match serialport::new(port1_name, 9600, ReadMode::Polling).open() {
         Err(e) => {
             eprintln!("Failed to open \"{}\". Error: {}", port1_name, e);
             ::std::process::exit(1);
@@ -64,7 +63,7 @@ fn main() {
 
     if port2_name != "" {
         // Run single-port tests on port2
-        let mut port2 = match serialport::new(port2_name, 9600).open() {
+        let mut port2 = match serialport::new(port2_name, 9600, ReadMode::Polling).open() {
             Err(e) => {
                 eprintln!("Failed to open \"{}\". Error: {}", port2_name, e);
                 ::std::process::exit(1);
@@ -426,5 +425,5 @@ fn set_defaults(port: &mut dyn serialport::SerialPort) {
     port.set_flow_control(FlowControl::Software).unwrap();
     port.set_parity(Parity::None).unwrap();
     port.set_stop_bits(StopBits::One).unwrap();
-    port.set_timeout(Duration::from_millis(0)).unwrap();
+    port.set_read_mode(ReadMode::Polling).unwrap();
 }
