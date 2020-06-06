@@ -131,13 +131,10 @@ impl From<Error> for io::Error {
 pub enum DataBits {
     /// 5 bits per character
     Five,
-
     /// 6 bits per character
     Six,
-
     /// 7 bits per character
     Seven,
-
     /// 8 bits per character
     Eight,
 }
@@ -155,10 +152,8 @@ pub enum DataBits {
 pub enum Parity {
     /// No parity bit.
     None,
-
     /// Parity bit sets odd number of 1 bits.
     Odd,
-
     /// Parity bit sets even number of 1 bits.
     Even,
 }
@@ -180,10 +175,8 @@ pub enum StopBits {
 pub enum FlowControl {
     /// No flow control.
     None,
-
     /// Flow control using XON/XOFF bytes.
     Software,
-
     /// Flow control using RTS/CTS signals.
     Hardware,
 }
