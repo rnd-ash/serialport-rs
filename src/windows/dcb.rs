@@ -19,6 +19,7 @@ pub(crate) fn get_dcb(handle: HANDLE) -> Result<DCB> {
 
 /// Initialize the DCB struct
 /// Set all values that won't be affected by `SerialPortBuilder` options.
+#[allow(dead_code)]
 pub(crate) fn init(dcb: &mut DCB) {
     // dcb.DCBlength
     // dcb.BaudRate
@@ -56,7 +57,7 @@ pub(crate) fn init(dcb: &mut DCB) {
 }
 
 pub(crate) fn set_dcb(handle: HANDLE, mut dcb: DCB) -> Result<()> {
-    if unsafe { SetCommState(handle, &mut dcb as *mut _) != 0 } {
+    if unsafe { SetCommState(handle, &mut dcb) != 0 } {
         return Ok(());
     } else {
         return Err(super::error::last_os_error());

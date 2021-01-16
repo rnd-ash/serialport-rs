@@ -1,11 +1,11 @@
-use std::mem::MaybeUninit;
+use std::{mem::MaybeUninit};
 use std::os::windows::prelude::*;
 use std::time::Duration;
 use std::{io, ptr};
 
-use winapi::shared::minwindef::*;
+use winapi::{ctypes::c_void, shared::{minwindef::*, winerror::ERROR_SEM_TIMEOUT}, um::winnt::MAXDWORD};
 use winapi::shared::ntdef::NULL;
-use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_OPERATION_ABORTED};
+use winapi::shared::winerror::{ERROR_IO_PENDING};
 use winapi::um::commapi::*;
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::fileapi::*;
@@ -34,6 +34,7 @@ use crate::{
 #[derive(Debug)]
 pub struct COMPort {
     handle: HANDLE,
+    event: HANDLE,
     timeout: Duration,
     port_name: Option<String>,
 }
@@ -75,16 +76,24 @@ impl COMPort {
         };
 
 
-        if handle != INVALID_HANDLE_VALUE {
-            let mut com = COMPort::open_from_raw_handle(handle as RawHandle);
-            com.port_name = Some(builder.path.clone());
-            COMPort::set_all(&mut com, builder)?;
-        } else {
+        if handle == INVALID_HANDLE_VALUE {
             return Err(super::error::last_os_error())
         }
 
-        let mut dcb = dcb::get_dcb(handle)?;
-        dcb::init(&mut dcb);
+        let event = unsafe {
+            CreateEventW(std::ptr::null_mut(), FALSE, FALSE, ptr::null_mut())
+        };
+
+        if event == NULL {
+            let error = super::error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+
+        let mut dcb: DCB = unsafe { std::mem::zeroed() };
+        dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
+        dcb.set_fBinary(TRUE as u32);
+
         dcb::set_baud_rate(&mut dcb, builder.baud_rate);
         dcb::set_data_bits(&mut dcb, builder.data_bits);
         dcb::set_parity(&mut dcb, builder.parity);
@@ -92,21 +101,12 @@ impl COMPort {
         dcb::set_flow_control(&mut dcb, builder.flow_control);
         dcb::set_dcb(handle, dcb)?;
 
-        let mut com = COMPort::open_from_raw_handle(handle as RawHandle);
+        let mut com = COMPort::open_from_raw_handle(handle as RawHandle, event);
         com.set_timeout(builder.timeout)?;
         com.port_name = Some(builder.path.clone());
         Ok(com)
     }
 
-    fn set_all(com: &mut COMPort, builder: &SerialPortBuilder) -> Result<()> {
-        com.set_baud_rate(builder.baud_rate)?;
-        com.set_data_bits(builder.data_bits)?;
-        com.set_flow_control(builder.flow_control)?;
-        com.set_parity(builder.parity)?;
-        com.set_stop_bits(builder.stop_bits)?;
-        com.set_timeout(builder.timeout)?;
-        Ok(())
-    }
 
     /// Attempts to clone the `SerialPort`. This allow you to write and read simultaneously from the
     /// same serial connection. Please note that if you want a real asynchronous serial port you
@@ -123,6 +123,12 @@ impl COMPort {
     ///
     /// This function returns an error if the serial port couldn't be cloned.
     pub fn try_clone_native(&self) -> Result<COMPort> {
+        let event = unsafe { CreateEventW(std::ptr::null_mut(), FALSE, FALSE, std::ptr::null_mut()) };
+        if event == NULL {
+            return Err(super::error::last_os_error())
+        }
+
+
         let process_handle: HANDLE = unsafe { GetCurrentProcess() };
         let mut cloned_handle: HANDLE = INVALID_HANDLE_VALUE;
         unsafe {
@@ -140,9 +146,12 @@ impl COMPort {
                     handle: cloned_handle,
                     port_name: self.port_name.clone(),
                     timeout: self.timeout,
+                    event
                 })
             } else {
-                Err(super::error::last_os_error())
+                let e = super::error::last_os_error();
+                CloseHandle(event);
+                return Err(e)
             }
         }
     }
@@ -162,13 +171,14 @@ impl COMPort {
         }
     }
 
-    fn open_from_raw_handle(handle: RawHandle) -> Self {
+    fn open_from_raw_handle(handle: RawHandle, event: HANDLE) -> Self {
         // It is not trivial to get the file path corresponding to a handle.
         // We'll punt and set it `None` here.
         COMPort {
             handle: handle as HANDLE,
             timeout: Duration::from_millis(100),
             port_name: None,
+            event
         }
     }
 }
@@ -177,136 +187,93 @@ impl Drop for COMPort {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.handle);
+            CloseHandle(self.event);
         }
-    }
-}
-
-impl AsRawHandle for COMPort {
-    fn as_raw_handle(&self) -> RawHandle {
-        self.handle as RawHandle
-    }
-}
-
-impl FromRawHandle for COMPort {
-    unsafe fn from_raw_handle(handle: RawHandle) -> Self {
-        COMPort::open_from_raw_handle(handle)
     }
 }
 
 impl io::Read for COMPort {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut read_size = buf.len();
+        // queue async read
+		let mut len: DWORD = 0;
+		let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+		overlapped.hEvent = self.event;
+		let res: BOOL = unsafe {
+			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
+			ReadFile(self.handle, buf.as_mut_ptr() as *mut c_void,
+				buf.len() as DWORD, &mut len, &mut overlapped)
+		};
 
-        let bytes_to_read = self.bytes_to_read()? as usize;
+		// async read request can (theoretically) succeed immediately, queue successfully, or fail
+		if res == TRUE {
+			return Ok(len as usize);
+		} else if unsafe { GetLastError() } != ERROR_IO_PENDING {
+			return Err(io::Error::last_os_error());
+		}
 
-        if self.timeout.as_millis() == 0 {
-            if bytes_to_read < read_size {
-                read_size = bytes_to_read;
-            }
-        }
-        if read_size > 0 {
-            let evt_handle: HANDLE = unsafe {
-                CreateEventW(
-                    ptr::null_mut(),
-                    true as BOOL,
-                    false as BOOL,
-                    ptr::null_mut(),
-                )
-            };
-            if evt_handle == NULL {
-                return Err(io::Error::last_os_error());
-            }
-            let mut overlapped: OVERLAPPED = unsafe { MaybeUninit::zeroed().assume_init() };
-            overlapped.hEvent = evt_handle;
-            let mut len: DWORD = 0;
-            let read_result = unsafe {
-                ReadFile(
-                    self.handle,
-                    buf.as_mut_ptr() as LPVOID,
-                    read_size as DWORD,
-                    &mut len,
-                    &mut overlapped,
-                )
-            };
-            if read_result == 0
-                && unsafe {
-                    GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_OPERATION_ABORTED
-                }
-            {
-                unsafe {
-                    CloseHandle(overlapped.hEvent);
-                }
-                return Err(io::Error::last_os_error());
-            }
-            let overlapped_result = unsafe {
-                GetOverlappedResult(self.handle, &mut overlapped, &mut len, true as BOOL)
-            };
-            unsafe {
-                CloseHandle(overlapped.hEvent);
-            }
-            if overlapped_result == 0 && unsafe { GetLastError() != ERROR_OPERATION_ABORTED } {
-                return Err(io::Error::last_os_error());
-            }
-            if len != 0 {
-                Ok(len as usize)
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Operation timed out",
-                ))
-            }
-        } else {
-            Ok(0)
-        }
+		// wait for completion
+		let res: BOOL = unsafe {
+			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
+			GetOverlappedResult(self.handle, &mut overlapped, &mut len, TRUE)
+		};
+		if res == FALSE {
+			return Err(io::Error::last_os_error());
+		}
+
+		match len {
+			0 if buf.len() == 0 => Ok(0),
+			0 => Err(io::Error::new(io::ErrorKind::TimedOut,
+					"ReadFile() timed out (0 bytes read)")),
+			_ => Ok(len as usize)
+		}
     }
 }
 
 impl io::Write for COMPort {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let _bytes_to_write = self.bytes_to_write()? as usize;
+        // queue async write
+		let mut len: DWORD = 0;
+		let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+		overlapped.hEvent = self.event;
+		let res: BOOL = unsafe {
+			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
+			WriteFile(self.handle, buf.as_ptr() as *const c_void,
+				buf.len() as DWORD, &mut len, &mut overlapped)
+		};
 
-        let evt_handle: HANDLE = unsafe {
-            CreateEventW(
-                ptr::null_mut(),
-                true as BOOL,
-                false as BOOL,
-                ptr::null_mut(),
-            )
-        };
-        if evt_handle == NULL {
-            return Err(io::Error::last_os_error());
-        }
-        let mut overlapped: OVERLAPPED = unsafe { MaybeUninit::zeroed().assume_init() };
-        overlapped.hEvent = evt_handle;
-        let mut len: DWORD = 0;
-        let write_result = unsafe {
-            WriteFile(
-                self.handle,
-                buf.as_ptr() as LPVOID,
-                buf.len() as DWORD,
-                &mut len,
-                &mut overlapped,
-            )
-        };
-        if write_result == 0
-            && unsafe {
-                GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_OPERATION_ABORTED
-            }
-        {
-            unsafe {
-                CloseHandle(overlapped.hEvent);
-            }
-            return Err(io::Error::last_os_error());
-        }
-        let overlapped_result =
-            unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut len, true as BOOL) };
-        unsafe {
-            CloseHandle(overlapped.hEvent);
-        }
-        if overlapped_result == 0 && unsafe { GetLastError() != ERROR_OPERATION_ABORTED } {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(len as usize)
+		// async write request can (theoretically) succeed immediately, queue successfully, or fail
+		if res == TRUE {
+			return Ok(len as usize);
+		} else if unsafe { GetLastError() } != ERROR_IO_PENDING {
+			return Err(io::Error::last_os_error());
+		}
+
+		// wait for completion
+		let res: BOOL = unsafe {
+			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
+			GetOverlappedResult(self.handle, &mut overlapped, &mut len, TRUE)
+		};
+		if res == FALSE {
+			// WriteFile() may fail with ERROR_SEM_TIMEOUT, which is not
+			// io::ErrorKind::TimedOut prior to Rust 1.46, so create a custom
+			// error with kind TimedOut to simplify subsequent error handling.
+			// https://github.com/rust-lang/rust/pull/71756
+			let error = io::Error::last_os_error();
+			// TODO: wrap if clause in if_rust_version! { < 1.46 { ... }}
+			if error.raw_os_error().unwrap() as DWORD == ERROR_SEM_TIMEOUT
+			&& error.kind() != io::ErrorKind::TimedOut {
+				return Err(io::Error::new(io::ErrorKind::TimedOut,
+					"WriteFile() timed out (ERROR_SEM_TIMEOUT)"));
+			}
+			return Err(error);
+		}
+
+		match len {
+			0 if buf.len() == 0 => Ok(0),
+			0 => Err(io::Error::new(io::ErrorKind::TimedOut,
+					"WriteFile() timed out (0 bytes written)")),
+			_ => Ok(len as usize)
+		}
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -327,20 +294,29 @@ impl SerialPort for COMPort {
     }
 
     fn set_timeout(&mut self, timeout: Duration) -> Result<()> {
-        let milliseconds = timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000;
+        let milliseconds = timeout.as_millis() as u64;
 
-        let mut timeouts = COMMTIMEOUTS {
-            ReadIntervalTimeout: 0,
-            ReadTotalTimeoutMultiplier: 0,
-            ReadTotalTimeoutConstant: milliseconds as DWORD,
-            WriteTotalTimeoutMultiplier: 0,
-            WriteTotalTimeoutConstant: 0,
+        let mut timeouts = if milliseconds == 0 {
+            COMMTIMEOUTS {
+                ReadIntervalTimeout: MAXDWORD,
+                ReadTotalTimeoutMultiplier: MAXDWORD,
+                ReadTotalTimeoutConstant: milliseconds as DWORD,
+                WriteTotalTimeoutMultiplier: 0,
+                WriteTotalTimeoutConstant: 0,
+            }    
+        } else {
+            COMMTIMEOUTS {
+                ReadIntervalTimeout: 0,
+                ReadTotalTimeoutMultiplier: 0,
+                ReadTotalTimeoutConstant: 0,
+                WriteTotalTimeoutMultiplier: 0,
+                WriteTotalTimeoutConstant: 0,
+            } 
         };
 
         if unsafe { SetCommTimeouts(self.handle, &mut timeouts) } == 0 {
             return Err(super::error::last_os_error());
         }
-
         self.timeout = timeout;
         Ok(())
     }
