@@ -4,10 +4,16 @@ use std::time::Duration;
 use std::{io, ptr};
 
 use winapi::shared::minwindef::*;
+use winapi::shared::ntdef::NULL;
+use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_OPERATION_ABORTED};
 use winapi::um::commapi::*;
+use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::fileapi::*;
 use winapi::um::handleapi::*;
+use winapi::um::ioapiset::GetOverlappedResult;
+use winapi::um::minwinbase::OVERLAPPED;
 use winapi::um::processthreadsapi::GetCurrentProcess;
+use winapi::um::synchapi::CreateEventW;
 use winapi::um::winbase::*;
 use winapi::um::winnt::{
     DUPLICATE_SAME_ACCESS, FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE,
@@ -63,13 +69,18 @@ impl COMPort {
                 0,
                 ptr::null_mut(),
                 OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                 0 as HANDLE,
             )
         };
 
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(super::error::last_os_error());
+
+        if handle != INVALID_HANDLE_VALUE {
+            let mut com = COMPort::open_from_raw_handle(handle as RawHandle);
+            com.port_name = Some(builder.path.clone());
+            COMPort::set_all(&mut com, builder)?;
+        } else {
+            return Err(super::error::last_os_error())
         }
 
         let mut dcb = dcb::get_dcb(handle)?;
@@ -85,6 +96,16 @@ impl COMPort {
         com.set_timeout(builder.timeout)?;
         com.port_name = Some(builder.path.clone());
         Ok(com)
+    }
+
+    fn set_all(com: &mut COMPort, builder: &SerialPortBuilder) -> Result<()> {
+        com.set_baud_rate(builder.baud_rate)?;
+        com.set_data_bits(builder.data_bits)?;
+        com.set_flow_control(builder.flow_control)?;
+        com.set_parity(builder.parity)?;
+        com.set_stop_bits(builder.stop_bits)?;
+        com.set_timeout(builder.timeout)?;
+        Ok(())
     }
 
     /// Attempts to clone the `SerialPort`. This allow you to write and read simultaneously from the
@@ -135,7 +156,6 @@ impl COMPort {
 
     fn read_pin(&mut self, pin: DWORD) -> Result<bool> {
         let mut status: DWORD = 0;
-
         match unsafe { GetCommModemStatus(self.handle, &mut status) } {
             0 => Err(super::error::last_os_error()),
             _ => Ok(status & pin != 0),
@@ -175,48 +195,118 @@ impl FromRawHandle for COMPort {
 
 impl io::Read for COMPort {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut len: DWORD = 0;
+        let mut read_size = buf.len();
 
-        match unsafe {
-            ReadFile(
-                self.handle,
-                buf.as_mut_ptr() as LPVOID,
-                buf.len() as DWORD,
-                &mut len,
-                ptr::null_mut(),
-            )
-        } {
-            0 => Err(io::Error::last_os_error()),
-            _ => {
-                if len != 0 {
-                    Ok(len as usize)
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "Operation timed out",
-                    ))
-                }
+        let bytes_to_read = self.bytes_to_read()? as usize;
+
+        if self.timeout.as_millis() == 0 {
+            if bytes_to_read < read_size {
+                read_size = bytes_to_read;
             }
+        }
+        if read_size > 0 {
+            let evt_handle: HANDLE = unsafe {
+                CreateEventW(
+                    ptr::null_mut(),
+                    true as BOOL,
+                    false as BOOL,
+                    ptr::null_mut(),
+                )
+            };
+            if evt_handle == NULL {
+                return Err(io::Error::last_os_error());
+            }
+            let mut overlapped: OVERLAPPED = unsafe { MaybeUninit::zeroed().assume_init() };
+            overlapped.hEvent = evt_handle;
+            let mut len: DWORD = 0;
+            let read_result = unsafe {
+                ReadFile(
+                    self.handle,
+                    buf.as_mut_ptr() as LPVOID,
+                    read_size as DWORD,
+                    &mut len,
+                    &mut overlapped,
+                )
+            };
+            if read_result == 0
+                && unsafe {
+                    GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_OPERATION_ABORTED
+                }
+            {
+                unsafe {
+                    CloseHandle(overlapped.hEvent);
+                }
+                return Err(io::Error::last_os_error());
+            }
+            let overlapped_result = unsafe {
+                GetOverlappedResult(self.handle, &mut overlapped, &mut len, true as BOOL)
+            };
+            unsafe {
+                CloseHandle(overlapped.hEvent);
+            }
+            if overlapped_result == 0 && unsafe { GetLastError() != ERROR_OPERATION_ABORTED } {
+                return Err(io::Error::last_os_error());
+            }
+            if len != 0 {
+                Ok(len as usize)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Operation timed out",
+                ))
+            }
+        } else {
+            Ok(0)
         }
     }
 }
 
 impl io::Write for COMPort {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut len: DWORD = 0;
+        let _bytes_to_write = self.bytes_to_write()? as usize;
 
-        match unsafe {
+        let evt_handle: HANDLE = unsafe {
+            CreateEventW(
+                ptr::null_mut(),
+                true as BOOL,
+                false as BOOL,
+                ptr::null_mut(),
+            )
+        };
+        if evt_handle == NULL {
+            return Err(io::Error::last_os_error());
+        }
+        let mut overlapped: OVERLAPPED = unsafe { MaybeUninit::zeroed().assume_init() };
+        overlapped.hEvent = evt_handle;
+        let mut len: DWORD = 0;
+        let write_result = unsafe {
             WriteFile(
                 self.handle,
                 buf.as_ptr() as LPVOID,
                 buf.len() as DWORD,
                 &mut len,
-                ptr::null_mut(),
+                &mut overlapped,
             )
-        } {
-            0 => Err(io::Error::last_os_error()),
-            _ => Ok(len as usize),
+        };
+        if write_result == 0
+            && unsafe {
+                GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_OPERATION_ABORTED
+            }
+        {
+            unsafe {
+                CloseHandle(overlapped.hEvent);
+            }
+            return Err(io::Error::last_os_error());
         }
+        let overlapped_result =
+            unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut len, true as BOOL) };
+        unsafe {
+            CloseHandle(overlapped.hEvent);
+        }
+        if overlapped_result == 0 && unsafe { GetLastError() != ERROR_OPERATION_ABORTED } {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(len as usize)
     }
 
     fn flush(&mut self) -> io::Result<()> {
