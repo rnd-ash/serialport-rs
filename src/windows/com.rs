@@ -91,6 +91,7 @@ impl COMPort {
         }
 
         let mut dcb: DCB = unsafe { std::mem::zeroed() };
+        dcb::init(&mut dcb);
         dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
         dcb.set_fBinary(TRUE as u32);
 

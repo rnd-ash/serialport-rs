@@ -19,7 +19,6 @@ pub(crate) fn get_dcb(handle: HANDLE) -> Result<DCB> {
 
 /// Initialize the DCB struct
 /// Set all values that won't be affected by `SerialPortBuilder` options.
-#[allow(dead_code)]
 pub(crate) fn init(dcb: &mut DCB) {
     // dcb.DCBlength
     // dcb.BaudRate
