@@ -142,18 +142,18 @@ impl COMPort {
                 TRUE,
                 DUPLICATE_SAME_ACCESS,
             );
-        }
+        };
         if res == 0 {
             let e = super::error::last_os_error();
             CloseHandle(event);
-            return Err(e)
+            return Err(e);
         } else {
             return Ok(COMPort {
                 handle: cloned_handle,
                 port_name: self.port_name.clone(),
                 timeout: self.timeout,
                 event
-            })
+            });
         }
     }
 
