@@ -141,7 +141,7 @@ impl COMPort {
                 0,
                 TRUE,
                 DUPLICATE_SAME_ACCESS,
-            );
+            )
         };
         if res == 0 {
             let e = super::error::last_os_error();
