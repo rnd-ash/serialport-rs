@@ -145,7 +145,7 @@ impl COMPort {
         };
         if res == 0 {
             let e = super::error::last_os_error();
-            CloseHandle(event);
+            unsafe { CloseHandle(event) };
             return Err(e);
         } else {
             return Ok(COMPort {
