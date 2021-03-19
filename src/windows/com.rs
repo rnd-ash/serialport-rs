@@ -148,7 +148,7 @@ impl COMPort {
             CloseHandle(event);
             return Err(e)
         } else {
-            Ok(COMPort {
+            return Ok(COMPort {
                 handle: cloned_handle,
                 port_name: self.port_name.clone(),
                 timeout: self.timeout,
