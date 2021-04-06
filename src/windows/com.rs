@@ -93,7 +93,6 @@ impl COMPort {
         let mut dcb: DCB = unsafe { std::mem::zeroed() };
         dcb::init(&mut dcb);
         dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
-        dcb.set_fBinary(TRUE as u32);
 
         dcb::set_baud_rate(&mut dcb, builder.baud_rate);
         dcb::set_data_bits(&mut dcb, builder.data_bits);
@@ -309,7 +308,7 @@ impl SerialPort for COMPort {
                 ReadTotalTimeoutMultiplier: MAXDWORD,
                 ReadTotalTimeoutConstant: milliseconds as DWORD,
                 WriteTotalTimeoutMultiplier: 0,
-                WriteTotalTimeoutConstant: milliseconds as DWORD,
+                WriteTotalTimeoutConstant: MAXDWORD,
             }    
         } else {
             COMMTIMEOUTS {
